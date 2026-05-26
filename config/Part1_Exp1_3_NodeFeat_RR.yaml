@@ -1,0 +1,33 @@
+experiment_name: Part1_Exp1_3_NodeFeat_RR
+seed: 42
+device: cuda
+
+dataset_params:
+  path: Data
+  train_split: Train
+  test_split: Test
+  beat_size_before: 100
+  beat_size_after: 180
+  graph_constructor: vg
+  feature_set: rr
+  edge_features: [delta_t, slope, length]
+  undersampling_ratio: 0.1
+  undersampling_method: stride
+  undersample_test: true
+  paradigm: inter
+  val_from_train_ratio: 0.2
+  preprocess_workers: 0
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 150
+
+model_params:
+  model_name: gine
+  in_channels: 5 # ii, v1, t, rr_pre, rr_pos
+  hidden_channels: 64
+  num_layers: 5
+  num_classes: 3
+  edge_dim: 3
+  readout: mean

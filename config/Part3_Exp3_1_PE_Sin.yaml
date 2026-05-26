@@ -1,0 +1,31 @@
+experiment_name: Part3_Exp3_1_PE_Sin
+seed: 42
+device: cuda
+
+dataset_params:
+  path: Data
+  train_split: Train
+  test_split: Test
+  beat_size_before: 100
+  beat_size_after: 180
+  pe_type: sin
+  undersampling_ratio: 0.1
+  undersampling_method: stride
+  undersample_test: true
+  preprocess_workers: 0
+  paradigm: inter
+  val_from_train_ratio: 0.2
+  feature_set: raw
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 150
+
+model_params:
+  model_name: gcn7
+  in_channels: 1
+  num_classes: 3
+  use_positional_encoding: true
+  pe_dim: 16
+  readout: mean
