@@ -245,9 +245,9 @@ If you use this code in your research, please cite:
 @article{luz2025arrhythmia,
   title   = {Disentangling Morphology and Context in Arrhythmia Classification:
              A Graph Neural Network Approach},
-  author  = {Luz, Eduardo J. S. and others},
+  author  = {Silva, Guilherme A. L.; Oliveira, Rafael F.; Moreira, Gladston J. P.; Freitas, Vander L. S.; Luz, Eduardo J. S.},
   journal = {Journal of the Brazilian Computer Society},
-  year    = {2025},
+  year    = {2026},
   note    = {Under review}
 }
 ```
