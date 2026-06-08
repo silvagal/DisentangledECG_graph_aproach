@@ -128,6 +128,72 @@ def _pick_candidates(
     return selected
 
 
+def _compute_fidelity(
+    explainer: "Explainer",
+    explanation,
+    model: torch.nn.Module,
+    candidate: Candidate,
+    device: torch.device,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return (fidelity_plus, fidelity_minus, characterization_score).
+
+    Tries PyG's built-in metric first; falls back to manual node-feature masking.
+
+    Fidelity+  = P(ŷ|G) − P(ŷ|G\\S)  — how much removing S hurts.
+    Fidelity−  = P(ŷ|G) − P(ŷ|S)    — how much keeping only S suffices.
+    Char. score = harmonic mean of Fidelity+ and (1 − Fidelity−).
+    """
+    try:
+        from torch_geometric.explain.metric import (
+            characterization_score as pyg_char_score,
+            fidelity as pyg_fidelity,
+        )
+        pos_fid, neg_fid = pyg_fidelity(explainer, explanation)
+        char_score = float(pyg_char_score(pos_fid, neg_fid))
+        return float(pos_fid), float(neg_fid), char_score
+    except Exception as exc:
+        print(f"[warn] PyG fidelity failed ({exc}); falling back to manual masking")
+
+    # ── Manual fallback: soft node-feature masking ──────────────────────────
+    try:
+        model.eval()
+        g = candidate.graph
+        x = g.x.to(device)
+        edge_index = g.edge_index.to(device)
+        edge_attr = g.edge_attr.to(device) if getattr(g, "edge_attr", None) is not None else None
+        batch = torch.zeros(x.size(0), dtype=torch.long, device=device)
+        pred_class = candidate.pred_label
+
+        nm = explanation.node_mask.to(device)
+        nm_norm = nm.abs().mean(dim=1, keepdim=True) if nm.ndim == 2 else nm.abs().unsqueeze(1)
+        max_val = nm_norm.max()
+        if max_val > 0:
+            nm_norm = nm_norm / max_val
+
+        with torch.no_grad():
+            data_orig = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, batch=batch)
+            p_orig = torch.softmax(model(data_orig), dim=1)[0, pred_class].item()
+
+            # Fidelity+: remove important features (complement mask)
+            data_comp = Data(x=x * (1.0 - nm_norm), edge_index=edge_index, edge_attr=edge_attr, batch=batch)
+            p_comp = torch.softmax(model(data_comp), dim=1)[0, pred_class].item()
+
+            # Fidelity−: keep only important features (subgraph mask)
+            data_sub = Data(x=x * nm_norm, edge_index=edge_index, edge_attr=edge_attr, batch=batch)
+            p_sub = torch.softmax(model(data_sub), dim=1)[0, pred_class].item()
+
+        pos_fid = float(p_orig - p_comp)
+        neg_fid = float(p_orig - p_sub)
+        pos_f = max(0.0, pos_fid)
+        one_minus_neg = max(0.0, 1.0 - neg_fid)
+        denom = 0.5 * pos_f + 0.5 * one_minus_neg
+        char_score = float(pos_f * one_minus_neg / denom) if denom > 0 else 0.0
+        return pos_fid, neg_fid, char_score
+    except Exception as exc2:
+        print(f"[warn] Manual fidelity also failed: {exc2}")
+        return None, None, None
+
+
 def _run_explainer(
     model: torch.nn.Module,
     candidate: Candidate,
@@ -182,6 +248,10 @@ def _run_explainer(
     top_edges = np.argsort(-edge_imp)[:top_k]
     region = _node_region_importance(node_imp)
 
+    pos_fid, neg_fid, char_score = _compute_fidelity(
+        explainer, explanation, model, candidate, device
+    )
+
     # Per-sample plot (kept for reference)
     _plot_single(candidate, node_imp, output_prefix)
 
@@ -190,6 +260,9 @@ def _run_explainer(
         "pred_label": CLASS_NAMES[candidate.pred_label],
         "confidence": candidate.confidence,
         "region_importance": region,
+        "fidelity_plus": pos_fid,
+        "fidelity_minus": neg_fid,
+        "characterization_score": char_score,
         "top_nodes": [
             {"index": int(i), "importance": float(node_imp[i])}
             for i in top_nodes.tolist()
@@ -306,22 +379,49 @@ def _make_combined_figure(
 def _aggregate_interpretability(results: Dict[int, List[Dict]]) -> Dict:
     out = {"per_class": {}, "overall": {}}
     all_regions: List[Dict[str, float]] = []
+    all_pos_fid: List[float] = []
+    all_neg_fid: List[float] = []
+    all_char: List[float] = []
+
     for cls_idx, payloads in results.items():
         if not payloads:
             continue
         regs = [p["region_importance"] for p in payloads]
         all_regions.extend(regs)
-        out["per_class"][CLASS_NAMES[cls_idx]] = {
+
+        pos_fids = [p["fidelity_plus"] for p in payloads if p.get("fidelity_plus") is not None]
+        neg_fids = [p["fidelity_minus"] for p in payloads if p.get("fidelity_minus") is not None]
+        chars = [p["characterization_score"] for p in payloads if p.get("characterization_score") is not None]
+        all_pos_fid.extend(pos_fids)
+        all_neg_fid.extend(neg_fids)
+        all_char.extend(chars)
+
+        entry: Dict = {
             "pre_r_mean": float(np.mean([r["pre_r"] for r in regs])),
             "around_r_mean": float(np.mean([r["around_r"] for r in regs])),
             "post_r_mean": float(np.mean([r["post_r"] for r in regs])),
         }
+        if pos_fids:
+            entry["fidelity_plus_mean"] = float(np.mean(pos_fids))
+        if neg_fids:
+            entry["fidelity_minus_mean"] = float(np.mean(neg_fids))
+        if chars:
+            entry["characterization_score_mean"] = float(np.mean(chars))
+        out["per_class"][CLASS_NAMES[cls_idx]] = entry
+
     if all_regions:
-        out["overall"] = {
+        overall: Dict = {
             "pre_r_mean": float(np.mean([r["pre_r"] for r in all_regions])),
             "around_r_mean": float(np.mean([r["around_r"] for r in all_regions])),
             "post_r_mean": float(np.mean([r["post_r"] for r in all_regions])),
         }
+        if all_pos_fid:
+            overall["fidelity_plus_mean"] = float(np.mean(all_pos_fid))
+        if all_neg_fid:
+            overall["fidelity_minus_mean"] = float(np.mean(all_neg_fid))
+        if all_char:
+            overall["characterization_score_mean"] = float(np.mean(all_char))
+        out["overall"] = overall
     return out
 
 
